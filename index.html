@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UGC Project Tracker – Stile Duolingo</title>
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel per JSX inline (comodo per GitHub Pages) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="min-h-screen bg-neutral-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    const currencySymbol = (c) => ({ EUR: "€", CHF: "Fr", USD: "$", GBP: "£" }[c] || c);
+    const fmtMoney = (n, currency = "EUR") =>
+      new Intl.NumberFormat("it-IT", { style: "currency", currency }).format(Number.isFinite(n) ? n : 0);
+
+    const STATUS = [
+      { value: "non_iniziato", label: "Non iniziato",     color: "bg-gray-200 text-gray-700" },
+      { value: "in_elaborazione", label: "In elaborazione", color: "bg-yellow-100 text-yellow-800" },
+      { value: "completato", label: "Completato",         color: "bg-emerald-100 text-emerald-800" },
+    ];
+    const statusByValue = Object.fromEntries(STATUS.map((s) => [s.value, s]));
+    const duolingoGreen = "#58CC02";
+
+    function App() {
+      const [rows, setRows] = useState([]);
+      const [query, setQuery] = useState("");
+      const [sortBy, setSortBy] = useState("createdAt");
+      const [sortDir, setSortDir] = useState("desc");
+
+      const [currency, setCurrency] = useState("EUR");
+      const [statusFilter, setStatusFilter] = useState("all");
+
+      // --- Form stato ---
+      const [cliente, setCliente] = useState("");
+      const [videoLink, setVideoLink] = useState("");
+      const [fileObjs, setFileObjs] = useState([]);
+      const [status, setStatus] = useState("non_iniziato");
+      const [budget, setBudget] = useState("");
+      const [paid, setPaid] = useState(false);
+      const [dueDate, setDueDate] = useState(""); // YYYY-MM-DD
+      const fileInputRef = useRef(null);
+
+      // Carica preferenze e progetti da localStorage
+      useEffect(() => {
+        try {
+          const raw = localStorage.getItem("ugc_projects_v1");
+          if (raw) { const parsed = JSON.parse(raw); if (Array.isArray(parsed)) setRows(parsed); }
+          const c  = localStorage.getItem("ugc_currency"); if (c) setCurrency(c);
+          const sf = localStorage.getItem("ugc_status_filter"); if (sf) setStatusFilter(sf);
+        } catch {}
+      }, []);
+
+      // Salva progetti
+      useEffect(() => {
+        try { localStorage.setItem("ugc_projects_v1", JSON.stringify(rows)); } catch {}
+      }, [rows]);
+
+      // Salva preferenze
+      useEffect(() => {
+        try {
+          localStorage.setItem("ugc_currency", currency);
+          localStorage.setItem("ugc_status_filter", statusFilter);
+        } catch {}
+      }, [currency, statusFilter]);
+
+      // Filtra + ordina
+      const filtered = useMemo(() => {
+        let out = rows;
+        if (query.trim()) {
+          const q = query.trim().toLowerCase();
+          out = out.filter((r) => {
+            const inBasic = [r.cliente, r.videoName, r.videoUrl].some((x) => (x || "").toLowerCase().includes(q));
+            const inAssets = (r.assets || []).some((a) => [a.name, a.url].some((x) => (x || "").toLowerCase().includes(q)));
+            return inBasic || inAssets;
+          });
+        }
+        if (statusFilter !== "all") out = out.filter((r) => r.status === statusFilter);
+        out = [...out].sort((a, b) => {
+          const dir = sortDir === "asc" ? 1 : -1;
+          let va = a[sortBy], vb = b[sortBy];
+          if (sortBy === "budget" || sortBy === "dueAt" || sortBy === "createdAt") { va = Number(va || 0); vb = Number(vb || 0); }
+          if (va < vb) return -1 * dir;
+          if (va > vb) return  1 * dir;
+          return 0;
+        });
+        return out;
+      }, [rows, query, sortBy, sortDir, statusFilter]);
+
+      const totals = useMemo(() => {
+        const total = rows.reduce((s, r) => s + (Number(r.budget) || 0), 0);
+        const incassato = rows.filter((r) => r.paid).reduce((s, r) => s + (Number(r.budget) || 0), 0);
+        return { total, incassato };
+      }, [rows]);
+
+      const filteredTotals = useMemo(() => {
+        const total = filtered.reduce((s, r) => s + (Number(r.budget) || 0), 0);
+        const incassato = filtered.filter((r) => r.paid).reduce((s, r) => s + (Number(r.budget) || 0), 0);
+        return { total, incassato };
+      }, [filtered]);
+
+      function resetForm() {
+        setCliente(""); setVideoLink(""); setFileObjs([]);
+        setStatus("non_iniziato"); setBudget(""); setPaid(false); setDueDate("");
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+
+      function addRow(e) {
+        e?.preventDefault?.();
+        if (!cliente.trim()) return alert("Inserisci il nome del cliente");
+
+        // Costruisci asset list da link + file
+        const assets = [];
+        const link = videoLink?.trim();
+        if (link) assets.push({ url: link, name: "Link video" });
+        for (const f of fileObjs) {
+          const url = URL.createObjectURL(f);
+          assets.push({ url, name: f.name });
+        }
+        const first = assets[0];
+        const dueAt = dueDate ? Date.parse(dueDate) : undefined;
+
+        const newRow = {
+          id: Math.random().toString(36).slice(2),
+          cliente: cliente.trim(),
+          videoUrl: first?.url,          // retrocompat
+          videoName: first?.name,
+          assets: assets.length ? assets : undefined,
+          status,
+          budget: Number(budget) || 0,
+          paid,
+          createdAt: Date.now(),
+          dueAt,
+        };
+        setRows((r) => [newRow, ...r]);
+        resetForm();
+      }
+
+      function deleteRow(id) { setRows((r) => r.filter((x) => x.id !== id)); }
+      function updateRow(id, patch) { setRows((r) => r.map((x) => (x.id === id ? { ...x, ...patch } : x))); }
+
+      function toggleSort(key) {
+        if (sortBy === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        else { setSortBy(key); setSortDir("asc"); }
+      }
+
+      function cycleStatus(id) {
+        setRows((r) =>
+          r.map((x) =>
+            x.id === id
+              ? { ...x, status: STATUS[(STATUS.findIndex((s) => s.value === x.status) + 1) % STATUS.length].value }
+              : x
+          )
+        );
+      }
+
+      function exportJSON() {
+        const blob = new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a"); a.href = url;
+        a.download = `ugc-projects-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      }
+
+      function exportCSV() {
+        const header = ["cliente","assets","status","budget","paid","createdAt","dueAt"];
+        const lines = [header.join(",")];
+        for (const r of rows) {
+          const assetsStr = (r.assets?.map(a => a.url).join("|") || r.videoUrl || "");
+          const vals = [
+            r.cliente ?? "",
+            assetsStr,
+            r.status ?? "",
+            String(r.budget ?? 0),
+            r.paid ? "1" : "0",
+            new Date(r.createdAt).toISOString(),
+            r.dueAt ? new Date(r.dueAt).toISOString().slice(0,10) : "",
+          ].map((v) => `"${String(v).replaceAll('"','""')}"`);
+          lines.push(vals.join(","));
+        }
+        const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a"); a.href = url;
+        a.download = `ugc-projects-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      }
+
+      function importJSON(e) {
+        const file = e.target.files?.[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try { const parsed = JSON.parse(String(reader.result || "[]")); if (Array.isArray(parsed)) setRows(parsed); else alert("File non valido"); }
+          catch { alert("Errore nel file JSON"); }
+        };
+        reader.readAsText(file);
+      }
+
+      return (
+        <div className="min-h-screen bg-neutral-50">
+          {/* Header verde */}
+          <header className="relative overflow-hidden z-0" style={{ background: `linear-gradient(135deg, ${duolingoGreen}, #9BE564)` }}>
+            <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-12 text-white">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-white/20 backdrop-blur flex items-center justify-center shadow"><span className="text-2xl">🎬</span></div>
+                <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">UGC Project Tracker</h1>
+              </div>
+              <p className="mt-2 max-w-2xl text-white/90">Gestisci clienti e video con uno stile pulito e giocoso, ispirato a Duolingo.</p>
+
+              {/* KPI */}
+              <div className="mt-6 grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <KPI label="Progetti" value={rows.length} />
+                <KPI label="Budget totale" value={fmtMoney(totals.total, currency)} />
+                <KPI label="Incassato" value={fmtMoney(totals.incassato, currency)} />
+                <KPI label="Da incassare" value={fmtMoney(totals.total - totals.incassato, currency)} />
+              </div>
+
+              {/* Barra azioni */}
+              <div className="mt-6 bg-white/15 rounded-2xl p-3 sm:p-4 backdrop-blur shadow-sm">
+                <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+                  <div className="flex-1">
+                    <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Cerca per cliente o video…" className="w-full rounded-xl px-4 py-2.5 bg-white/90 text-gray-800 placeholder-gray-500 outline-none focus:ring-2 ring-white/60 shadow" />
+                  </div>
+                  <div className="flex gap-2">
+                    <select value={currency} onChange={(e) => setCurrency(e.target.value)} className="px-4 py-2 rounded-full bg-white text-emerald-700 font-semibold shadow hover:bg-white/90 transition" title="Valuta">
+                      <option value="EUR">EUR €</option>
+                      <option value="CHF">CHF Fr</option>
+                      <option value="USD">USD $</option>
+                      <option value="GBP">GBP £</option>
+                    </select>
+                    <button onClick={exportJSON} className="px-4 py-2 rounded-full bg-white text-emerald-700 font-semibold shadow hover:bg-white/90 transition" title="Esporta JSON">JSON</button>
+                    <button onClick={exportCSV} className="px-4 py-2 rounded-full bg-white text-emerald-700 font-semibold shadow hover:bg-white/90 transition" title="Esporta CSV">CSV</button>
+                    <label className="px-4 py-2 rounded-full bg-white text-emerald-700 font-semibold shadow hover:bg-white/90 transition cursor-pointer">Importa
+                      <input type="file" accept="application/json" className="hidden" onChange={importJSON} />
+                    </label>
+                    <button onClick={() => { if (confirm("Sicuro di voler cancellare tutti i progetti?")) setRows([]); }} className="px-4 py-2 rounded-full bg-white/20 text-white font-semibold shadow hover:bg-white/30 transition" title="Svuota tutto">Svuota</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* Spacer anti-sovrapposizione (Safari safe) */}
+          <div className="h-16 md:h-20"></div>
+
+          {/* Corpo */}
+          <main className="relative z-10 max-w-6xl mx-auto px-4 sm:px-6 mt-0 pb-24">
+            {/* Nuovo progetto */}
+            <section className="bg-white rounded-3xl shadow-xl p-4 sm:p-6 border border-emerald-100">
+              <h2 className="text-lg sm:text-xl font-bold text-gray-800 flex items-center gap-2">
+                <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl" style={{ background: duolingoGreen }}><span className="text-white">＋</span></span>
+                Aggiungi progetto
+              </h2>
+              <form onSubmit={addRow} className="mt-4 grid grid-cols-1 md:grid-cols-12 gap-3">
+                <div className="md:col-span-3">
+                  <Label>Cliente</Label>
+                  <input value={cliente} onChange={(e) => setCliente(e.target.value)} placeholder="Nome del cliente" className="w-full rounded-xl px-3 py-2.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none" />
+                </div>
+
+                <div className="md:col-span-3">
+                  <Label>Link video</Label>
+                  <input value={videoLink} onChange={(e) => setVideoLink(e.target.value)} type="url" placeholder="https://…" className="w-full rounded-xl px-3 py-2.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none" />
+                </div>
+
+                <div className="md:col-span-3">
+                  <Label>oppure File (multipli)</Label>
+                  <input ref={fileInputRef} type="file" multiple accept="video/*,application/zip,application/x-zip-compressed" onChange={(e) => setFileObjs(Array.from(e.target.files || []))} className="w-full rounded-xl px-3 py-2.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none" />
+                  {fileObjs.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {fileObjs.map((f, i) => (<span key={i} className="px-2 py-1 rounded-full bg-neutral-100 border border-neutral-200 text-xs text-gray-700">{f.name}</span>))}
+                      <button type="button" onClick={() => { setFileObjs([]); if (fileInputRef.current) fileInputRef.current.value = ""; }} className="text-xs underline text-gray-600">Svuota</button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="md:col-span-2">
+                  <Label>Stato</Label>
+                  <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full rounded-xl px-3 py-2.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none">
+                    {STATUS.map((s) => (<option key={s.value} value={s.value}>{s.label}</option>))}
+                  </select>
+                </div>
+
+                <div className="md:col-span-1">
+                  <Label>Budget ({currencySymbol(currency)})</Label>
+                  <input value={budget} onChange={(e) => setBudget(e.target.value.replace(",", "."))} type="number" step="0.01" placeholder="0.00" className="w-full rounded-xl px-3 py-2.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none" />
+                </div>
+
+                <div className="md:col-span-2">
+                  <Label>Scadenza</Label>
+                  <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="w-full rounded-xl px-3 py-2.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none" />
+                </div>
+
+                <div className="md:col-span-1">
+                  <Label>Pagamento</Label>
+                  <EmojiToggle value={paid} onChange={setPaid} />
+                </div>
+
+                <div className="md:col-span-12 flex justify-end gap-2">
+                  <button type="button" onClick={resetForm} className="px-4 py-2 rounded-full bg-neutral-100 text-gray-700 font-medium border border-neutral-200 hover:bg-neutral-200">Reset</button>
+                  <button type="submit" className="px-5 py-2.5 rounded-full text-white font-semibold shadow" style={{ background: duolingoGreen }}>Aggiungi</button>
+                </div>
+              </form>
+            </section>
+
+            {/* Tabella */}
+            <section className="mt-6 bg-white rounded-3xl shadow-xl border border-emerald-100 overflow-hidden">
+              <div className="px-4 sm:px-6 py-4 flex items-center justify-between border-b">
+                <h3 className="font-bold text-gray-800">Progetti</h3>
+                <div className="text-sm text-gray-500">
+                  {filtered.length} risultati • {fmtMoney(filteredTotals.total, currency)} tot • {fmtMoney(filteredTotals.incassato, currency)} incassati
+                </div>
+              </div>
+
+              {/* Filtri stato */}
+              <div className="px-4 sm:px-6 py-3 border-b bg-white/50">
+                <div className="flex flex-wrap gap-2">
+                  <FilterPill active={statusFilter === "all"} onClick={() => setStatusFilter("all")}>Tutti</FilterPill>
+                  {STATUS.map((s) => (
+                    <FilterPill key={s.value} active={statusFilter === s.value} onClick={() => setStatusFilter(s.value)}>{s.label}</FilterPill>
+                  ))}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-neutral-50 text-gray-600">
+                    <tr>
+                      <TH onClick={() => toggleSort("cliente")}   active={sortBy === "cliente"}   dir={sortDir}>Cliente</TH>
+                      <TH>Video</TH>
+                      <TH onClick={() => toggleSort("status")}    active={sortBy === "status"}    dir={sortDir}>Stato (clicca il badge per cambiare)</TH>
+                      <TH onClick={() => toggleSort("budget")}    active={sortBy === "budget"}    dir={sortDir}>Budget</TH>
+                      <TH onClick={() => toggleSort("paid")}      active={sortBy === "paid"}      dir={sortDir}>Pagamento</TH>
+                      <TH onClick={() => toggleSort("dueAt")}     active={sortBy === "dueAt"}     dir={sortDir}>Scadenza</TH>
+                      <TH onClick={() => toggleSort("createdAt")} active={sortBy === "createdAt"} dir={sortDir}>Creato il</TH>
+                      <th className="px-4 py-3 text-right">Azioni</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((row) => (
+                      <RowItem key={row.id} row={row} onDelete={deleteRow} onUpdate={updateRow} currency={currency} onCycleStatus={cycleStatus} />
+                    ))}
+                    {filtered.length === 0 && (
+                      <tr><td className="px-4 py-10 text-center text-gray-500" colSpan="8">Nessun progetto. Aggiungine uno qui sopra 👆</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </main>
+        </div>
+      );
+    }
+
+    function KPI({ label, value }) {
+      return (
+        <div className="bg-white/90 rounded-2xl p-4 shadow flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-white/60 flex items-center justify-center text-lg">✨</div>
+          <div><div className="text-xs uppercase tracking-wide text-gray-500">{label}</div><div className="text-lg font-extrabold text-gray-800">{value}</div></div>
+        </div>
+      );
+    }
+    function Label({ children }) { return <div className="text-xs font-semibold text-gray-600 mb-1">{children}</div>; }
+    function TH({ children, onClick, active, dir }) {
+      return (
+        <th onClick={onClick} className={`px-4 py-3 text-left whitespace-nowrap select-none ${onClick ? "cursor-pointer" : ""} ${active ? "text-emerald-700" : "text-gray-600"}`} title={onClick ? "Ordina" : undefined}>
+          <div className="inline-flex items-center gap-1">{children}{active && <span>{dir === "asc" ? "▲" : "▼"}</span>}</div>
+        </th>
+      );
+    }
+    function Badge({ status }) {
+      const s = statusByValue[status] || STATUS[0];
+      return <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${s.color}`}>{s.label}</span>;
+    }
+    function EmojiToggle({ value, onChange }) {
+      return (
+        <div className="inline-flex items-center gap-2" role="group" aria-label="Pagamento">
+          <button type="button" onClick={() => onChange(true)} className={`h-9 w-9 rounded-full border shadow-sm flex items-center justify-center ${value ? "bg-emerald-100 border-emerald-300" : "bg-white border-neutral-300"}`} title="Pagato" aria-pressed={value}><span className="text-xl">✅</span></button>
+          <button type="button" onClick={() => onChange(false)} className={`h-9 w-9 rounded-full border shadow-sm flex items-center justify-center ${!value ? "bg-red-50 border-red-200" : "bg-white border-neutral-300"}`} title="Non pagato" aria-pressed={!value}><span className="text-xl">❌</span></button>
+        </div>
+      );
+    }
+    function RowItem({ row, onDelete, onUpdate, currency, onCycleStatus }) {
+      const [editing, setEditing] = useState(false);
+      const [form, setForm] = useState({ ...row });
+      React.useEffect(() => setForm({ ...row }), [row.id]);
+
+      function save() {
+        onUpdate(row.id, {
+          cliente: (form.cliente || "").trim(),
+          videoUrl: form.videoUrl || undefined,
+          videoName: form.videoName || undefined,
+          status: form.status,
+          budget: Number(form.budget) || 0,
+          paid: !!form.paid,
+          dueAt: form.dueAt ? Number(form.dueAt) : undefined,
+        });
+        setEditing(false);
+      }
+
+      const overdue = row.dueAt && row.dueAt < Date.now() && row.status !== "completato";
+
+      return (
+        <tr className="border-t align-top">
+          <td className="px-4 py-3">
+            {editing ? (
+              <input value={form.cliente} onChange={(e) => setForm((f) => ({ ...f, cliente: e.target.value }))} className="w-full rounded-lg px-2 py-1.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 outline-none" />
+            ) : (<div className="font-medium text-gray-800">{row.cliente}</div>)}
+          </td>
+
+          <td className="px-4 py-3">
+            {editing ? (
+              <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                <input value={form.videoUrl || ""} onChange={(e) => setForm((f) => ({ ...f, videoUrl: e.target.value }))} placeholder="Link principale (opzionale)" className="w-full rounded-lg px-2 py-1.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 outline-none" />
+                <input value={form.videoName || ""} onChange={(e) => setForm((f) => ({ ...f, videoName: e.target.value }))} placeholder="Nome (opzionale)" className="w-full sm:w-48 rounded-lg px-2 py-1.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 outline-none" />
+              </div>
+            ) : row.assets?.length ? (
+              <ul className="space-y-1">
+                {row.assets.slice(0,3).map((a,i)=>(<li key={i}><a href={a.url} target="_blank" rel="noreferrer" className="text-emerald-700 hover:underline">{a.name || `File ${i+1}`}</a></li>))}
+                {row.assets.length > 3 && (<li className="text-xs text-gray-500">+{row.assets.length - 3} altri…</li>)}
+              </ul>
+            ) : row.videoUrl ? (
+              <a href={row.videoUrl} target="_blank" rel="noreferrer" className="text-emerald-700 hover:underline" title={row.videoName || row.videoUrl}>{row.videoName || "Apri"}</a>
+            ) : (<span className="text-gray-400">—</span>)}
+          </td>
+
+          <td className="px-4 py-3">
+            {editing ? (
+              <select value={form.status} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} className="w-full rounded-lg px-2 py-1.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 outline-none">
+                {STATUS.map((s) => (<option key={s.value} value={s.value}>{s.label}</option>))}
+              </select>
+            ) : (
+              <button type="button" onClick={() => onCycleStatus(row.id)} className="hover:opacity-80 transition" title="Clicca per cambiare stato"><Badge status={row.status} /></button>
+            )}
+          </td>
+
+          <td className="px-4 py-3 whitespace-nowrap">
+            {editing ? (
+              <input value={form.budget} onChange={(e) => setForm((f) => ({ ...f, budget: e.target.value }))} type="number" step="0.01" className="w-28 rounded-lg px-2 py-1.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 outline-none" />
+            ) : (<span className="font-medium">{fmtMoney(row.budget, currency)}</span>)}
+          </td>
+
+          <td className="px-4 py-3">
+            {editing ? (
+              <EmojiToggle value={!!form.paid} onChange={(val) => { setForm((f) => ({ ...f, paid: val })); onUpdate(row.id, { paid: val }); }} />
+            ) : (
+              <button type="button" onClick={() => onUpdate(row.id, { paid: !row.paid })} className="text-lg hover:scale-110 transition transform" title={row.paid ? "Pagato (clicca per Non pagato)" : "Non pagato (clicca per Pagato)"} aria-label={row.paid ? "Pagato" : "Non pagato"}>{row.paid ? "✅" : "❌"}</button>
+            )}
+          </td>
+
+          <td className="px-4 py-3 whitespace-nowrap">
+            {editing ? (
+              <input type="date" value={form.dueAt ? new Date(form.dueAt).toISOString().slice(0,10) : ""} onChange={(e) => setForm((f) => ({ ...f, dueAt: e.target.value ? Date.parse(e.target.value) : undefined }))} className="w-40 rounded-lg px-2 py-1.5 bg-neutral-50 border border-neutral-200 focus:border-emerald-400 outline-none" />
+            ) : row.dueAt ? (
+              <span className={row.dueAt < Date.now() && row.status !== "completato" ? "text-red-600 font-semibold" : "text-gray-700"}>
+                {new Date(row.dueAt).toLocaleDateString("it-IT")}
+              </span>
+            ) : (<span className="text-gray-400">—</span>)}
+          </td>
+
+          <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{new Date(row.createdAt).toLocaleDateString("it-IT")}</td>
+
+          <td className="px-4 py-3 text-right whitespace-nowrap">
+            {editing ? (
+              <div className="inline-flex gap-2">
+                <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded-full bg-neutral-100 text-gray-700 border border-neutral-200 hover:bg-neutral-200">Annulla</button>
+                <button onClick={save} className="px-3 py-1.5 rounded-full text-white font-semibold shadow" style={{ background: "#58CC02" }}>Salva</button>
+              </div>
+            ) : (
+              <div className="inline-flex gap-2">
+                <button onClick={() => setEditing(true)} className="px-3 py-1.5 rounded-full bg-neutral-100 text-gray-800 border border-neutral-200 hover:bg-neutral-200">Modifica</button>
+                <button onClick={() => onDelete(row.id)} className="px-3 py-1.5 rounded-full bg-red-50 text-red-600 border border-red-200 hover:bg-red-100">Elimina</button>
+              </div>
+            )}
+          </td>
+        </tr>
+      );
+    }
+  </script>
+
+  <script type="text/babel">
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
